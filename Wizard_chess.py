@@ -1,8 +1,74 @@
 import threading
 import chess
+import chess.uci
+from abc import abstractmethod
 
 import RPi.GPIO as GPIO
 from motor_class import Motor
+
+
+class Player:
+    @abstractmethod
+    def get_next_move(self, board):
+        pass
+
+
+class HumanPlayer(Player):
+    def get_next_move(self, board):
+        possible_moves = list(map(lambda move: move.uci(), board.generate_legal_moves()))
+        print('Possible moves you can make: {}'.format(possible_moves))
+
+        while True:
+            move_uci_str = input('{}, please enter where to move. '.format(get_player_for_current_turn(board)))
+            try:
+                move = chess.Move.from_uci(move_uci_str.rstrip().lstrip())
+            except ValueError:
+                print('"{}" not formatted correctly'.format(move_uci_str))
+                continue
+
+            moved_piece = board.piece_at(move.from_square)
+
+            if move in board.legal_moves:
+                break
+            elif moved_piece is None:
+                print('No piece is there!')
+            elif moved_piece.color != board.turn:
+                print("That's someone else's piece!")
+            elif board.piece_at(move.to_square) is not None and board.piece_at(move.to_square).color == board.turn:
+                print('You cannot take your own piece!')
+            elif board.is_into_check(move):
+                print('You cannot move into check!')
+            else:
+                print('A {} cannot make that move!'.format(chess.PIECE_NAMES[moved_piece.piece_type]))
+
+        return move
+
+
+class ComputerPlayer(Player):
+    def __init__(self, uci_engine_path, skill_level, think_time_ms=100):
+        """
+        Initialize the computer
+        :param uci_engine_path: the path to the uci engine executable
+        :param skill_level: How good of a player it is. For stockfish this can be anything in he range of [0, 20],
+        where 20 is the best, and 0 is the worst
+        :param think_time_ms: how long the engine should spend thinking each turn in milliseconds. default 100ms
+        """
+        self.engine = chess.uci.popen_engine(uci_engine_path)
+        self.engine.uci()
+
+        # see http://support.stockfishchess.org/kb/advanced-topics/engine-parameters for stockfish parameters.
+        # note: if you don't use stockfish these will be different
+        opts = {'Skill Level': skill_level}
+        self.engine.setoption(opts)
+
+        self.think_time_ms = think_time_ms
+
+    def get_next_move(self, board):
+        self.engine.ucinewgame()
+        self.engine.position(board)
+        best_move, ponder_move = self.engine.go(movetime=self.think_time_ms)
+        self.engine.stop()
+        return best_move
 
 
 class Magnet:
@@ -135,32 +201,6 @@ class MotorMover:
         return 'MotorMover({}, {})'.format(self.x, self.y)
 
 
-def read_move(board):
-    print('Possible moves you can make: {}'.format(list(map(lambda move: move.uci(), board.generate_legal_moves()))))
-    while True:
-        move_uci_str = input('{}, please enter where to move. '.format(get_player_for_current_turn(board)))
-        try:
-            move = chess.Move.from_uci(move_uci_str.rstrip().lstrip())
-        except ValueError:
-            print('"{}" not formatted correctly'.format(move_uci_str))
-            continue
-
-        if move in board.legal_moves:
-            break
-        elif board.piece_at(move.from_square) is None:
-            print('No piece is there!')
-        elif board.piece_at(move.from_square).color != board.turn:
-            print("That's someone else's piece!")
-        elif board.piece_at(move.to_square) is not None and board.piece_at(move.to_square).color == board.turn:
-            print('You cannot take your own piece!')
-        elif board.is_into_check(move):
-            print('You cannot move into check!')
-        else:
-            print('A {} cannot make that move!'.format(chess.PIECE_NAMES[board.piece_at(move.from_square).piece_type]))
-
-    return move
-
-
 def get_player_for_current_turn(board):
     return chess.COLOR_NAMES[board.turn].capitalize()
 
@@ -267,7 +307,23 @@ def display_moves_made(moves_made):
     print('')
 
 
-if __name__ == '__main__':
+def setup_players():
+    play_computer = input('Play against a computer (y/n)? ')
+    if play_computer:
+        player_color_str = input('What color do you want to play as (w/b)? ')
+        player_color = chess.WHITE if player_color_str == 'w' else chess.BLACK
+
+        # modify the skill level here if you want to make the computer better or worse.
+        # 0 is the worst, 20 is the best
+        players = {player_color: HumanPlayer(), not player_color: ComputerPlayer('./stockfish_8_x64', skill_level=10)}
+    else:
+        players = {chess.WHITE: HumanPlayer(), chess.BLACK: HumanPlayer()}
+    return players
+
+
+def main():
+    players = setup_players()
+
     mover = MotorMover(Motor(17, 18, 27, 22), Motor(4, 25, 24, 23))
 
     # initialize the magnet and make sure its not grabbing anything
@@ -281,7 +337,7 @@ if __name__ == '__main__':
 
     display_board(board)
     while not board.is_checkmate():
-        move = read_move(board)
+        move = players[board.turn].get_next_move(board)
 
         moved_piece = board.piece_at(move.from_square)
         captured_piece = board.piece_at(move.to_square)
@@ -306,3 +362,7 @@ if __name__ == '__main__':
     mover.move_to(0, 0)
 
     Magnet.cleanup()
+
+
+if __name__ == '__main__':
+    main()
